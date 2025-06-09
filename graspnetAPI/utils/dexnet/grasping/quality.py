@@ -56,7 +56,7 @@ from mpl_toolkits.mplot3d import Axes3D
 import IPython
 
 # turn off output logging
-cvx.solvers.options['show_progress'] = False
+# cvx.solvers.options['show_progress'] = False
 
 
 class PointGraspMetrics3D:
