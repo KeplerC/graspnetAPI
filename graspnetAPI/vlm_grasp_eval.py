@@ -703,8 +703,24 @@ class VLMGraspEval:
         for posevector in posevectors:
             obj_idx, obj_pose = parse_posevector(posevector)
             if obj_idx == target_obj_idx:
+                # Debug information
+                print(f"🔍 Coordinate transformation debug:")
+                print(f"   Object pose in table frame:\n{obj_pose}")
+                print(f"   Camera pose (table to camera):\n{camera_pose}")
+                print(f"   Align matrix (cam0 to table):\n{align_mat}")
+                
                 # Transform from table coordinate to camera coordinate
-                obj_pose_in_camera = np.linalg.inv(np.matmul(align_mat, camera_pose)) @ obj_pose
+                # obj_pose: object -> table
+                # align_mat: cam0 -> table
+                # camera_pose: table -> camera 
+                # We want: object -> camera
+                
+                # Method 1: Direct transformation (assuming camera_pose is table->camera)
+                obj_pose_in_camera = camera_pose @ obj_pose
+                
+                print(f"   Final object pose (object->camera):\n{obj_pose_in_camera}")
+                print(f"   Object position in camera: {obj_pose_in_camera[:3, 3]}")
+                
                 return obj_pose_in_camera
         
         raise ValueError(f"Object {target_obj_idx} not found in scene {scene_id} annotation {ann_id}")
@@ -1256,6 +1272,11 @@ class VLMGraspEval:
                 scene_points = np.array(pcd.points)
                 scene_colors = np.array(pcd.colors)
                 
+                print(f"   🌐 Scene point cloud debug:")
+                print(f"      Scene bounds: {scene_points.min(axis=0)} to {scene_points.max(axis=0)}")
+                print(f"      Scene center: {scene_points.mean(axis=0)}")
+                print(f"      Scene points count: {len(scene_points)}")
+                
                 # Add scene point cloud
                 server.scene.add_point_cloud(
                     name="scene_points",
@@ -1267,6 +1288,8 @@ class VLMGraspEval:
                 
             except Exception as e:
                 print(f"   ⚠️ Could not load scene point cloud: {e}")
+                import traceback
+                traceback.print_exc()
             
             # Add VLM grasp visualization
             self._add_vlm_grasp_to_viser(server, result)
@@ -1286,8 +1309,15 @@ class VLMGraspEval:
                 object_model, _ = self.get_object_model_and_dexnet(scene_id, ann_id, target_obj_idx)
                 object_pose = self.get_object_pose_in_camera(scene_id, ann_id, target_obj_idx)
                 
+                print(f"   🎯 Object model debug:")
+                print(f"      Original model bounds: {object_model.min(axis=0)} to {object_model.max(axis=0)}")
+                print(f"      Model center (object coords): {object_model.mean(axis=0)}")
+                
                 # Transform object model to camera coordinates
                 object_model_cam = self.transform_points(object_model, object_pose)
+                
+                print(f"      Transformed model bounds: {object_model_cam.min(axis=0)} to {object_model_cam.max(axis=0)}")
+                print(f"      Model center (camera coords): {object_model_cam.mean(axis=0)}")
                 
                 server.scene.add_point_cloud(
                     name="object_model",
@@ -1299,6 +1329,8 @@ class VLMGraspEval:
                 
             except Exception as e:
                 print(f"   ⚠️ Could not load object model: {e}")
+                import traceback
+                traceback.print_exc()
             
             # Add text information
             info_text = f"""VLM Grasp Evaluation Results
@@ -1392,13 +1424,20 @@ Legend:
             gt_points = []
             gt_colors = []
             
+            print(f"   📍 Processing {len(gt_grasps)} ground truth grasps:")
+            
             for i, (grasp, score) in enumerate(zip(gt_grasps, gt_scores)):
                 # Extract grasp center and rotation
-                grasp_center = grasp[13:16]  # translation
-                rotation_matrix = grasp[4:13].reshape(3, 3)  # rotation
+                grasp_center = grasp[13:16]  # translation in object coordinates
+                rotation_matrix = grasp[4:13].reshape(3, 3)  # rotation in object coordinates
                 
-                # Transform to camera coordinates
-                grasp_center_cam = self.transform_points(grasp_center.reshape(1, -1), object_pose)[0]
+                print(f"      GT grasp {i}: center_obj={grasp_center}, score={score:.3f}")
+                
+                # Transform grasp center to camera coordinates
+                grasp_center_homo = np.append(grasp_center, 1.0)  # Make homogeneous
+                grasp_center_cam = (object_pose @ grasp_center_homo)[:3]
+                
+                print(f"                  center_cam={grasp_center_cam}")
                 
                 gt_points.append(grasp_center_cam)
                 
@@ -1413,13 +1452,13 @@ Legend:
                 
                 # Add individual grasp frame for top grasps
                 if i < 5:  # Only show frames for top 5 grasps
-                    # Create pose matrix
-                    gt_pose = np.eye(4)
-                    gt_pose[:3, :3] = rotation_matrix
-                    gt_pose[:3, 3] = grasp_center
+                    # Create pose matrix in object coordinates
+                    gt_pose_obj = np.eye(4)
+                    gt_pose_obj[:3, :3] = rotation_matrix
+                    gt_pose_obj[:3, 3] = grasp_center
                     
                     # Transform pose to camera coordinates
-                    gt_pose_cam = object_pose @ gt_pose
+                    gt_pose_cam = object_pose @ gt_pose_obj
                     
                     self._add_coordinate_frame_to_viser(
                         server,
@@ -1442,6 +1481,8 @@ Legend:
             
         except Exception as e:
             print(f"   ⚠️ Error adding ground truth grasps: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _add_coordinate_frame_to_viser(self, server, name: str, pose: np.ndarray, 
                                      scale: float = 0.1, alpha: float = 1.0):
@@ -1538,6 +1579,116 @@ Legend:
         except Exception as e:
             print(f"   ⚠️ Could not estimate surface normal: {e}")
             return np.array([0, 0, 1])  # Default upward normal
+
+    def debug_coordinate_transforms(self, scene_id: int, ann_id: int, target_obj_idx: int):
+        """
+        Debug coordinate transformations to understand alignment issues.
+        
+        **Input:**
+        - scene_id: scene index
+        - ann_id: annotation index
+        - target_obj_idx: object index
+        """
+        print(f"🔧 Debugging coordinate transformations for scene {scene_id}, ann {ann_id}, obj {target_obj_idx}")
+        
+        try:
+            # Load all transformation components
+            scene_name = f'scene_{scene_id:04d}'
+            camera_poses_path = os.path.join(self.root, 'scenes', scene_name, self.camera, 'camera_poses.npy')
+            align_mat_path = os.path.join(self.root, 'scenes', scene_name, self.camera, 'cam0_wrt_table.npy')
+            
+            if not os.path.exists(camera_poses_path):
+                camera_poses_path = os.path.join(self.root, scene_name, self.camera, 'camera_poses.npy')
+                align_mat_path = os.path.join(self.root, scene_name, self.camera, 'cam0_wrt_table.npy')
+            
+            camera_poses = np.load(camera_poses_path)
+            align_mat = np.load(align_mat_path)
+            camera_pose = camera_poses[ann_id]
+            
+            # Load object pose
+            annotation_path = os.path.join(os.path.dirname(camera_poses_path), 'annotations', f'{ann_id:04d}.xml')
+            from .utils.xmlhandler import xmlReader
+            from .utils.eval_utils import parse_posevector
+            
+            scene_reader = xmlReader(annotation_path)
+            posevectors = scene_reader.getposevectorlist()
+            
+            obj_pose_table = None
+            for posevector in posevectors:
+                obj_idx, obj_pose = parse_posevector(posevector)
+                if obj_idx == target_obj_idx:
+                    obj_pose_table = obj_pose
+                    break
+            
+            if obj_pose_table is None:
+                print(f"❌ Object {target_obj_idx} not found in scene")
+                return
+            
+            print(f"\n📊 Transformation Matrix Analysis:")
+            print(f"Camera pose (shape: {camera_pose.shape}):")
+            print(f"  Translation: {camera_pose[:3, 3]}")
+            print(f"  Matrix:\n{camera_pose}")
+            
+            print(f"\nAlign matrix (shape: {align_mat.shape}):")
+            print(f"  Translation: {align_mat[:3, 3]}")
+            print(f"  Matrix:\n{align_mat}")
+            
+            print(f"\nObject pose in table (shape: {obj_pose_table.shape}):")
+            print(f"  Translation: {obj_pose_table[:3, 3]}")
+            print(f"  Matrix:\n{obj_pose_table}")
+            
+            # Test different transformation combinations
+            print(f"\n🧪 Testing transformation combinations:")
+            
+            # Method 1: camera_pose @ obj_pose_table
+            transform1 = camera_pose @ obj_pose_table
+            print(f"Method 1 - camera_pose @ obj_pose_table:")
+            print(f"  Result translation: {transform1[:3, 3]}")
+            
+            # Method 2: inv(align_mat @ camera_pose) @ obj_pose_table (original)
+            transform2 = np.linalg.inv(align_mat @ camera_pose) @ obj_pose_table
+            print(f"Method 2 - inv(align_mat @ camera_pose) @ obj_pose_table:")
+            print(f"  Result translation: {transform2[:3, 3]}")
+            
+            # Method 3: inv(camera_pose) @ obj_pose_table
+            transform3 = np.linalg.inv(camera_pose) @ obj_pose_table  
+            print(f"Method 3 - inv(camera_pose) @ obj_pose_table:")
+            print(f"  Result translation: {transform3[:3, 3]}")
+            
+            # Test with a simple object point (origin)
+            test_point_obj = np.array([0, 0, 0, 1])  # Object origin in homogeneous coords
+            
+            print(f"\n🎯 Testing object origin transformation:")
+            print(f"Method 1 result: {(transform1 @ test_point_obj)[:3]}")
+            print(f"Method 2 result: {(transform2 @ test_point_obj)[:3]}")
+            print(f"Method 3 result: {(transform3 @ test_point_obj)[:3]}")
+            
+            # Load actual scene data for comparison
+            try:
+                pcd = self.loadScenePointCloud(scene_id, self.camera, ann_id)
+                scene_points = np.array(pcd.points)
+                print(f"\nScene point cloud bounds: {scene_points.min(axis=0)} to {scene_points.max(axis=0)}")
+                
+                object_model, _ = self.get_object_model_and_dexnet(scene_id, ann_id, target_obj_idx)
+                print(f"Object model bounds: {object_model.min(axis=0)} to {object_model.max(axis=0)}")
+                
+                # Check which transformation method puts object model closest to scene
+                for i, transform in enumerate([transform1, transform2, transform3], 1):
+                    transformed_model = self.transform_points(object_model, transform)
+                    model_center = transformed_model.mean(axis=0)
+                    
+                    # Find closest scene point to model center
+                    distances = np.linalg.norm(scene_points - model_center, axis=1)
+                    min_dist = distances.min()
+                    print(f"Method {i} - Model center: {model_center}, closest scene distance: {min_dist:.3f}")
+                
+            except Exception as e:
+                print(f"Could not load scene/model data: {e}")
+                
+        except Exception as e:
+            print(f"❌ Error in coordinate debug: {e}")
+            import traceback
+            traceback.print_exc()
 
 
 # Example usage and demonstration
