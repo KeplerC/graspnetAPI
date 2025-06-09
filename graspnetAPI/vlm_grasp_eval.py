@@ -15,7 +15,7 @@ from .grasp import GraspGroup, Grasp
 from .utils.config import get_config
 from .utils.eval_utils import (
     load_dexnet_model, voxel_sample_points, 
-    get_grasp_score, collision_detection
+    get_grasp_score, collision_detection, eval_grasp, transform_points
 )
 try:
     from .utils.eval_utils import get_scene_name
@@ -90,8 +90,8 @@ class VLMGraspEval:
             consider yourself as a robot arm with a parallel gripper, give the parameters on the objects in the image that the gripper should contact with  that allows a success and stable grasp while lifting, transporting and shaking
             Look at this image and identify the {target_object}. 
             I need you to suggest the best antipodal grasp points for picking up this object.
-            
-                         Please return EXACTLY two 2D pixel coordinates on the image that represent 
+            The points MUST be on the object and not on the background without collision with other objects.
+            Please return EXACTLY two 2D pixel coordinates on the image that represent 
              optimal grasp locations (where gripper fingers should contact the object).
              
              Return your answer in this exact JSON format:
@@ -346,75 +346,91 @@ class VLMGraspEval:
         return grasp_array
     
     def evaluate_grasp_dexnet(self, grasp_array: np.ndarray, object_model: np.ndarray, 
-                            dexnet_model, friction_coef: float = 0.4) -> float:
+                            dexnet_model, object_pose: np.ndarray = None, friction_coef: float = 0.4) -> float:
         """
-        Evaluate grasp quality using DexNet.
+        Evaluate grasp quality using DexNet via the existing eval_grasp infrastructure.
         
         **Input:**
-        - grasp_array: grasp in GraspNet array format
+        - grasp_array: grasp in GraspNet array format (in camera coordinates)
         - object_model: point cloud of the object
         - dexnet_model: loaded DexNet model for the object
+        - object_pose: 4x4 transformation matrix from object to camera frame
         - friction_coef: friction coefficient
         
         **Output:**
         - quality_score: grasp quality score from DexNet
         """
+        print(f"🔍 Starting DexNet evaluation using existing infrastructure...")
+        print(f"   Grasp array shape: {grasp_array.shape}")
+        print(f"   Object model points: {len(object_model) if object_model is not None else 'None'}")
+        print(f"   DexNet model type: {type(dexnet_model)}")
+        print(f"   Object pose available: {object_pose is not None}")
+        
         try:
-            # Create Grasp object from the DexNet utils
-            from .utils.dexnet.grasping.grasp import ParallelJawPtGrasp3D
-            from .utils.dexnet.grasping.contacts import Contact3D
-            from .utils.dexnet.grasping.graspable_object import GraspableObject3D
-            from .utils.dexnet.grasping.grasp_quality_config import GraspQualityConfig
+            # Import required functions from existing infrastructure
+            from .utils.eval_utils import eval_grasp, transform_points
+            from .grasp import GraspGroup
+            from .utils.dexnet.grasping.grasp_quality_config import GraspQualityConfigFactory
             
-            # Extract grasp pose from array
-            score = grasp_array[0]
-            width = grasp_array[1]
-            height = grasp_array[2] 
-            depth = grasp_array[3]
-            rotation_matrix = grasp_array[4:13].reshape(3, 3)
-            translation = grasp_array[13:16]
+            # Create a GraspGroup with our single grasp
+            grasp_group = GraspGroup()
+            grasp_group.grasp_group_array = grasp_array.reshape(1, -1)  # Single grasp
             
-            # Create DexNet grasp configuration
-            config = self.dexnet_config['metrics']['force_closure'].copy()
-            config['friction_coef'] = friction_coef
+            print(f"   ✅ Created GraspGroup with 1 grasp")
             
-            # Calculate grasp endpoints from pose
-            grasp_center = translation
-            grasp_axis = rotation_matrix[:, 1]  # Y-axis for finger separation
+            if object_pose is None:
+                print("   ❌ No object pose available - cannot evaluate without proper coordinate transformation")
+                return -1.0
             
-            # Calculate jaw endpoints
-            endpoint1 = grasp_center - (width / 2.0) * grasp_axis
-            endpoint2 = grasp_center + (width / 2.0) * grasp_axis
+            # Prepare inputs for eval_grasp function
+            models = [object_model]  # List of object models (in object coordinates)
+            dexnet_models = [dexnet_model]  # List of DexNet models
+            poses = [object_pose]  # List of poses (object to camera)
             
-            # Create DexNet grasp from endpoints
-            grasp = ParallelJawPtGrasp3D.grasp_from_endpoints(
-                endpoint1, 
-                endpoint2, 
-                width=width,
-                approach_angle=0,  # Use default approach angle
-                close_width=0.01   # Minimum close width
+            # Use the DexNet config from our class
+            config = self.dexnet_config.copy()
+            
+            print(f"   Calling eval_grasp with {len(models)} objects...")
+            
+            # Call the existing eval_grasp function
+            grasp_list, score_list, collision_mask_list = eval_grasp(
+                grasp_group=grasp_group,
+                models=models,
+                dexnet_models=dexnet_models,
+                poses=poses,
+                config=config,
+                table=None,  # No table for simplicity
+                voxel_size=0.008,
+                TOP_K=1
             )
             
-            # Evaluate force closure quality
-            fc_list = [0.2, 0.4, 0.6, 0.8, 1.0, 1.2]
-            force_closure_quality_config = {}
-            for fc in fc_list:
-                temp_config = config.copy()
-                temp_config['friction_coef'] = fc
-                force_closure_quality_config[fc] = GraspQualityConfig(temp_config)
+            print(f"   ✅ eval_grasp completed")
+            print(f"   Grasp list length: {len(grasp_list)}")
+            print(f"   Score list length: {len(score_list)}")
             
-            # Use the DexNet evaluation function
-            quality_score = get_grasp_score(grasp, dexnet_model, fc_list, force_closure_quality_config)
-            
-            return quality_score if quality_score >= 0 else -1.0
-            
+            # Extract the score for our grasp
+            if len(score_list) > 0 and len(score_list[0]) > 0:
+                quality_score = score_list[0][0]  # First object, first grasp
+                collision_detected = collision_mask_list[0][0] if len(collision_mask_list) > 0 and len(collision_mask_list[0]) > 0 else False
+                
+                print(f"   Quality score: {quality_score}")
+                print(f"   Collision detected: {collision_detected}")
+                
+                if collision_detected:
+                    print("   ⚠️ Grasp has collision, returning -1")
+                    return -1.0
+                    
+                print(f"   🎯 Final quality score: {quality_score}")
+                return quality_score
+            else:
+                print("   ❌ No scores returned from eval_grasp")
+                return -1.0
+                
         except Exception as e:
-            print(f"Error evaluating grasp with DexNet: {e}")
+            print(f"❌ Error in DexNet evaluation: {e}")
             import traceback
             traceback.print_exc()
             return -1.0
-        
-
     
     def get_object_model_and_dexnet(self, scene_id: int, ann_id: int, 
                                    target_obj_idx: int) -> Tuple[np.ndarray, object]:
@@ -712,13 +728,13 @@ class VLMGraspEval:
         except Exception as e:
             return {'error': f'Failed to convert 2D to 3D coordinates: {e}'}
         
-        # Get object pose for better grasp orientation
+        # Get object pose for proper coordinate transformation
         try:
             object_pose = self.get_object_pose_in_camera(scene_id, ann_id, target_obj_idx)
             print(f"Object pose loaded successfully")
         except Exception as e:
             print(f"Warning: Could not load object pose: {e}")
-            print("Using default approach vector")
+            print("This will affect DexNet evaluation accuracy")
             object_pose = None
         
         # Determine approach vector from object pose if available
@@ -745,9 +761,9 @@ class VLMGraspEval:
             scene_id, ann_id, target_obj_idx
         )
         
-        # Evaluate with DexNet
+        # Evaluate with DexNet (now passing object_pose for proper coordinate transformation)
         print("Evaluating grasp quality with DexNet...")
-        dexnet_score = self.evaluate_grasp_dexnet(grasp_array, object_model, dexnet_model)
+        dexnet_score = self.evaluate_grasp_dexnet(grasp_array, object_model, dexnet_model, object_pose)
         
         # Compile results
         result = {
@@ -1071,9 +1087,9 @@ def example_usage():
     # Adjust these paths according to your setup
     graspnet_root = "/path/to/graspnet"  # Change this to your GraspNet root
     vlm_config = {
-        'model': 'qwen2.5vl:7b',  # or 'qwen2.5'
+        'model': 'qwen2.5vl:32b',  # or 'qwen2.5'
         'endpoint': 'http://localhost:11434/api/generate',
-        'temperature': 0.7,
+        'temperature': 0.1,
         'max_tokens': 500
     }
     
