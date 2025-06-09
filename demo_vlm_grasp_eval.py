@@ -91,7 +91,7 @@ def setup_vlm_config(vlm_type: str = 'ollama', api_key: str = None) -> Dict:
             return None
         
         config = {
-            'model': 'gpt-4-vision-preview',
+            'model': 'gpt-4o',
             'api_key': api_key,
             'temperature': 0.1,
             'max_tokens': 500

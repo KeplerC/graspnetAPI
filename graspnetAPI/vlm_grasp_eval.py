@@ -53,7 +53,7 @@ class VLMGraspEval:
         
         # Default VLM configuration for Ollama
         self.vlm_config = vlm_config or {
-            'model': 'qwen2.5vl:7b',
+            'model': 'qwen2.5vl:32b',
             'endpoint': 'http://localhost:11434/api/generate',
             'temperature': 0.1,
             'max_tokens': 500
@@ -87,6 +87,7 @@ class VLMGraspEval:
         """
         if prompt is None:
             prompt = f"""
+            consider yourself as a robot arm with a parallel gripper, give the parameters on the objects in the image that the gripper should contact with  that allows a success and stable grasp while lifting, transporting and shaking
             Look at this image and identify the {target_object}. 
             I need you to suggest the best antipodal grasp points for picking up this object.
             
@@ -175,7 +176,7 @@ class VLMGraspEval:
         }
         
         payload = {
-            "model": "gpt-4-vision-preview",
+            "model": "gpt-4o",  # Updated to current GPT-4 with vision
             "messages": [
                 {
                     "role": "user",
@@ -188,7 +189,8 @@ class VLMGraspEval:
                     ]
                 }
             ],
-            "max_tokens": self.vlm_config.get('max_tokens', 500)
+            "max_tokens": self.vlm_config.get('max_tokens', 500),
+            "temperature": self.vlm_config.get('temperature', 0.1)
         }
         
         try:
@@ -1071,7 +1073,7 @@ def example_usage():
     vlm_config = {
         'model': 'qwen2.5vl:7b',  # or 'qwen2.5'
         'endpoint': 'http://localhost:11434/api/generate',
-        'temperature': 0.1,
+        'temperature': 0.7,
         'max_tokens': 500
     }
     
