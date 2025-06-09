@@ -1,0 +1,52 @@
+============================================================
+VLM GRASP POSE DEBUG REPORT
+============================================================
+
+Scene ID: 0
+Annotation ID: 0
+Target Object: banana
+Object Index: 5
+DexNet Score: -1.000
+
+GRASP POINTS (3D)
+------------------------------
+Point 1: [-0.190658, 0.010801, 0.505000]
+Point 2: [-0.094516, 0.010780, 0.504000]
+Grasp Width: 0.096147 m
+Grasp Center: [-0.142587, 0.010791, 0.504500]
+
+COORDINATE FRAME ANALYSIS
+------------------------------
+X-axis (width): [0.000273, 0.999988, 0.004813]
+Y-axis (grasp): [0.999946, -0.000222, -0.010401]
+Z-axis (approach): [-0.010400, 0.004815, -0.999934]
+
+ORTHOGONALITY CHECK
+------------------------------
+X·Y dot product: 0.000000 (should be ~0)
+X·Z dot product: 0.000000 (should be ~0)
+Y·Z dot product: -0.000000 (should be ~0)
+Orthogonality OK: True
+
+AXIS MAGNITUDES
+------------------------------
+||X-axis||: 1.000000 (should be 1.0)
+||Y-axis||: 1.000000 (should be 1.0)
+||Z-axis||: 1.000000 (should be 1.0)
+
+GRASP POSE MATRIX
+------------------------------
+[ 0.00027  0.99995 -0.01040 -0.14259]
+[ 0.99999 -0.00022  0.00482  0.01079]
+[ 0.00481 -0.01040 -0.99993  0.50450]
+[ 0.00000  0.00000  0.00000  1.00000]
+
+POTENTIAL ISSUES
+------------------------------
+❌ Collision detected or negative score
+
+RECOMMENDATIONS
+------------------------------
+• Check for gripper-object collisions
+• Verify grasp points are on object surface
+• Consider different approach angle

@@ -248,6 +248,10 @@ class VLMGraspEval:
                                      approach_vector: List[float] = None) -> np.ndarray:
         """
         Convert antipodal points to 6DOF grasp pose.
+        Fixed to follow GraspNet coordinate convention:
+        - X-axis: approach direction (towards object)
+        - Y-axis: grasp axis (finger separation direction)  
+        - Z-axis: orthogonal to both (gripper closing direction)
         
         **Input:**
         - point1: first grasp point [x, y, z]
@@ -263,56 +267,76 @@ class VLMGraspEval:
         # Grasp center is midpoint between the two points
         grasp_center = (point1 + point2) / 2.0
         
-        # Grasp axis is the line connecting the two points
-        grasp_axis = point2 - point1
-        grasp_axis = grasp_axis / np.linalg.norm(grasp_axis)
+        # Grasp axis (Y-axis) is the line connecting the two points
+        y_axis = point2 - point1
+        y_axis = y_axis / np.linalg.norm(y_axis)
         
-        # Default approach vector (negative z-axis)
+        # Default approach vector (perpendicular to grasp axis, pointing away from surface)
         if approach_vector is None:
-            approach_vector = np.array([0, 0, -1])
+            # Simple approach: use the vector from grasp center pointing towards camera
+            # This ensures the gripper approaches from outside the object
+            to_camera = -grasp_center  # Vector from origin to grasp center
+            to_camera_norm = np.linalg.norm(to_camera)
+            
+            if to_camera_norm > 0:
+                approach_vector = to_camera / to_camera_norm
+            else:
+                # Fallback to negative Z (typical camera approach)
+                approach_vector = np.array([0, 0, -1])
         else:
             approach_vector = np.array(approach_vector)
             approach_vector = approach_vector / np.linalg.norm(approach_vector)
         
-        # Create orthogonal coordinate system
-        # Y-axis aligns with grasp axis (finger separation direction)
-        y_axis = grasp_axis
+        # Create orthogonal coordinate system following GraspNet convention
+        # X-axis is the approach direction
+        x_axis = approach_vector
         
-        # Z-axis is the approach direction
-        z_axis = approach_vector
-        
-        # X-axis is orthogonal to both Y and Z
-        x_axis = np.cross(y_axis, z_axis)
-        x_axis_norm = np.linalg.norm(x_axis)
-        
-        # Handle case where y_axis and z_axis are parallel
-        if x_axis_norm < 1e-6:
-            # Choose a different approach vector if parallel
-            if abs(z_axis[2]) < 0.9:  # Not aligned with Z
-                temp_vector = np.array([0, 0, 1])
-            else:  # Aligned with Z, use X instead
-                temp_vector = np.array([1, 0, 0])
-            
-            x_axis = np.cross(y_axis, temp_vector)
-            x_axis_norm = np.linalg.norm(x_axis)
-            
-            if x_axis_norm < 1e-6:  # Still parallel, use Y
-                temp_vector = np.array([0, 1, 0])
-                x_axis = np.cross(y_axis, temp_vector)
-                x_axis_norm = np.linalg.norm(x_axis)
-        
-        x_axis = x_axis / x_axis_norm
-        
-        # Recompute Z-axis to ensure orthogonality
+        # Z-axis is orthogonal to both X and Y (gripper closing direction)
         z_axis = np.cross(x_axis, y_axis)
-        z_axis = z_axis / np.linalg.norm(z_axis)
+        z_axis_norm = np.linalg.norm(z_axis)
+        
+        # Handle case where x_axis and y_axis are parallel
+        if z_axis_norm < 1e-6:
+            # Choose a different orthogonal vector
+            if abs(np.dot(x_axis, [0, 0, 1])) < 0.9:
+                temp_vector = np.array([0, 0, 1])
+            else:
+                temp_vector = np.array([0, 1, 0])
+            
+            z_axis = np.cross(x_axis, temp_vector)
+            z_axis_norm = np.linalg.norm(z_axis)
+            
+            if z_axis_norm < 1e-6:
+                temp_vector = np.array([1, 0, 0])
+                z_axis = np.cross(x_axis, temp_vector)
+                z_axis_norm = np.linalg.norm(z_axis)
+        
+        z_axis = z_axis / z_axis_norm
+        
+        # Recompute Y-axis to ensure perfect orthogonality
+        y_axis = np.cross(z_axis, x_axis)
+        y_axis = y_axis / np.linalg.norm(y_axis)
         
         # Construct 4x4 transformation matrix
         grasp_pose = np.eye(4)
-        grasp_pose[0:3, 0] = x_axis
-        grasp_pose[0:3, 1] = y_axis
-        grasp_pose[0:3, 2] = z_axis
+        grasp_pose[0:3, 0] = x_axis  # approach direction
+        grasp_pose[0:3, 1] = y_axis  # grasp axis (finger separation)
+        grasp_pose[0:3, 2] = z_axis  # orthogonal (gripper closing)
         grasp_pose[0:3, 3] = grasp_center
+        
+        # Debug coordinate system
+        print(f"🧭 Grasp Coordinate System Debug:")
+        print(f"   Grasp center: {grasp_center}")
+        print(f"   Grasp width: {np.linalg.norm(point2 - point1):.3f} m")
+        print(f"   X-axis (approach): {x_axis} (norm: {np.linalg.norm(x_axis):.3f})")
+        print(f"   Y-axis (grasp): {y_axis} (norm: {np.linalg.norm(y_axis):.3f})")
+        print(f"   Z-axis (closing): {z_axis} (norm: {np.linalg.norm(z_axis):.3f})")
+        
+        # Check orthogonality
+        xy_dot = np.dot(x_axis, y_axis)
+        xz_dot = np.dot(x_axis, z_axis)
+        yz_dot = np.dot(y_axis, z_axis)
+        print(f"   Orthogonality: X·Y={xy_dot:.6f}, X·Z={xz_dot:.6f}, Y·Z={yz_dot:.6f}")
         
         return grasp_pose
     
@@ -417,7 +441,11 @@ class VLMGraspEval:
                 print(f"   Collision detected: {collision_detected}")
                 
                 if collision_detected:
-                    print("   ⚠️ Grasp has collision, returning -1")
+                    print("   ⚠️ Grasp has collision")
+                    print("   💡 Possible fixes:")
+                    print("      - Adjust approach angle")
+                    print("      - Move grasp points to better surface locations")
+                    print("      - Check coordinate system orientation")
                     return -1.0
                     
                 print(f"   🎯 Final quality score: {quality_score}")
@@ -463,6 +491,116 @@ class VLMGraspEval:
             dexnet_model = load_dexnet_model(os.path.join(model_dir, '%03d' % target_obj_idx, 'textured'))
         
         return object_model, dexnet_model
+
+    def load_ground_truth_grasps(self, target_obj_idx: int, scene_id: int = None, 
+                                max_grasps: int = 50) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Load ground truth grasps for a specific object.
+        
+        **Input:**
+        - target_obj_idx: object index
+        - scene_id: scene ID (if None, loads all scenes)
+        - max_grasps: maximum number of grasps to return
+        
+        **Output:**
+        - grasp_array: numpy array of shape (N, 17) with ground truth grasps
+        - scores: numpy array of shape (N,) with grasp quality scores
+        """
+        from .utils.rotation import batch_viewpoint_params_to_matrix
+        
+        # Load grasp labels
+        grasp_labels_path = os.path.join(self.root, 'grasp_label', f'{target_obj_idx:03d}_labels.npz')
+        
+        if not os.path.exists(grasp_labels_path):
+            print(f"Ground truth grasp labels not found: {grasp_labels_path}")
+            return np.array([]), np.array([])
+        
+        # Load the npz file
+        grasp_data = np.load(grasp_labels_path)
+        points = grasp_data['points']  # (N, 3) grasp points on object
+        offsets = grasp_data['offsets']  # (N, 300, 12, 4, 3) viewpoint, angle, depth, width offsets
+        scores = grasp_data['scores']  # (N, 300, 12, 4) quality scores
+        collision_mask = grasp_data['collision']  # (N, 300, 12, 4) collision mask
+        
+        print(f"✅ Loaded ground truth grasps for object {target_obj_idx}")
+        print(f"   Points: {points.shape}, Offsets: {offsets.shape}")
+        print(f"   Scores: {scores.shape}, Collision: {collision_mask.shape}")
+        
+        # Extract valid grasps (non-collision, positive scores)
+        valid_mask = (scores > 0.4) & (~collision_mask)  # Filter by score threshold and no collision
+        
+        if not np.any(valid_mask):
+            print("No valid ground truth grasps found")
+            return np.array([]), np.array([])
+        
+        # Get indices of valid grasps
+        point_ids, view_ids, angle_ids, depth_ids = np.where(valid_mask)
+        
+        # Limit number of grasps
+        num_valid = len(point_ids)
+        if num_valid > max_grasps:
+            # Select top grasps by score
+            valid_scores = scores[valid_mask]
+            top_indices = np.argsort(valid_scores)[-max_grasps:]
+            point_ids = point_ids[top_indices]
+            view_ids = view_ids[top_indices]
+            angle_ids = angle_ids[top_indices]
+            depth_ids = depth_ids[top_indices]
+        
+        print(f"   Selected {len(point_ids)} valid grasps")
+        
+        # Generate grasps in GraspNet format
+        grasp_list = []
+        score_list = []
+        
+        # Generate template views (300 viewpoints)
+        from .utils.utils import generate_views
+        template_views = generate_views(300)
+        
+        for i, (pid, vid, aid, did) in enumerate(zip(point_ids, view_ids, angle_ids, depth_ids)):
+            try:
+                # Get grasp parameters
+                grasp_point = points[pid]  # 3D point on object surface
+                view_vector = template_views[vid]  # viewing direction
+                angle_offset = offsets[pid, vid, aid, did, 0]  # rotation angle
+                depth_offset = offsets[pid, vid, aid, did, 1]  # grasp depth
+                width = offsets[pid, vid, aid, did, 2]  # grasp width
+                score = scores[pid, vid, aid, did]
+                
+                # Convert to rotation matrix - fix array shape issues
+                view_batch = (-view_vector).reshape(1, -1)  # Shape: (1, 3)
+                angle_batch = np.array([angle_offset])       # Shape: (1,) - FIXED: removed extra brackets
+                
+                # Debug shapes
+                if i == 0:  # Only print for first grasp
+                    print(f"   Debug shapes: view_batch={view_batch.shape}, angle_batch={angle_batch.shape}")
+                
+                R = batch_viewpoint_params_to_matrix(view_batch, angle_batch)
+                R = R[0]  # Remove batch dimension, shape: (3, 3)
+                
+                # Create grasp array [score, width, height, depth, 9x rotation, 3x translation, object_id]
+                grasp_array = np.zeros(17)
+                grasp_array[0] = score
+                grasp_array[1] = width
+                grasp_array[2] = 0.02  # default height
+                grasp_array[3] = depth_offset
+                grasp_array[4:13] = R.flatten()
+                grasp_array[13:16] = grasp_point
+                grasp_array[16] = target_obj_idx
+                
+                grasp_list.append(grasp_array)
+                score_list.append(score)
+                
+            except Exception as e:
+                print(f"   ⚠️ Error processing grasp {i}: {e}")
+                continue
+        
+        if len(grasp_list) == 0:
+            print("   ❌ No grasps could be processed successfully")
+            return np.array([]), np.array([])
+        
+        print(f"   ✅ Successfully processed {len(grasp_list)} grasps")
+        return np.array(grasp_list), np.array(score_list)
     
     def loadScenePointCloud(self, scene_id: int, camera: str, ann_id: int) -> o3d.geometry.PointCloud:
         """
@@ -691,25 +829,31 @@ class VLMGraspEval:
             error_msg += f"\n- Check target_obj_idx {target_obj_idx} exists in the models folder"
             return {'error': error_msg}
         
-        # Query VLM for grasp points
-        print(f"Querying {vlm_type} VLM for grasp points...")
-        if vlm_type == 'ollama':
-            vlm_response = self.query_vlm_ollama(image_path, target_object)
-        elif vlm_type == 'openai':
-            if api_key is None:
-                return {'error': 'API key required for OpenAI'}
-            vlm_response = self.query_vlm_openai(image_path, target_object, api_key)
-        else:
-            return {'error': f'Unsupported VLM type: {vlm_type}'}
+        # # Query VLM for grasp points
+        # print(f"Querying {vlm_type} VLM for grasp points...")
+        # if vlm_type == 'ollama':
+        #     vlm_response = self.query_vlm_ollama(image_path, target_object)
+        # elif vlm_type == 'openai':
+        #     if api_key is None:
+        #         return {'error': 'API key required for OpenAI'}
+        #     vlm_response = self.query_vlm_openai(image_path, target_object, api_key)
+        # else:
+        #     return {'error': f'Unsupported VLM type: {vlm_type}'}
         
-        if vlm_response is None:
-            return {'error': 'Failed to get VLM response'}
+        # if vlm_response is None:
+        #     return {'error': 'Failed to get VLM response'}
         
-        # Parse VLM response
-        parsed_response = self.parse_vlm_response(vlm_response, vlm_type)
-        if parsed_response is None:
-            return {'error': 'Failed to parse VLM response'}
+        # # Parse VLM response
+        # parsed_response = self.parse_vlm_response(vlm_response, vlm_type)
+        # if parsed_response is None:
+        #     return {'error': 'Failed to parse VLM response'}
         
+        parsed_response = {
+            'point1': [405, 385],
+            'point2': [500, 420],
+            'confidence': 1.0,
+            'reasoning': 'Test reasoning'
+        }
         print(f"VLM suggested 2D grasp points:")
         print(f"Point 1 (pixels): {parsed_response['point1']}")
         print(f"Point 2 (pixels): {parsed_response['point2']}")
@@ -742,6 +886,12 @@ class VLMGraspEval:
         if object_pose is not None:
             # Use the object's up direction (Z-axis) as approach vector
             approach_vector = object_pose[:3, 2]
+        else:
+            # Estimate surface normal at grasp center for better approach vector
+            grasp_center = (point1_3d + point2_3d) / 2.0
+            surface_normal = self.estimate_surface_normal(grasp_center, scene_id, ann_id)
+            approach_vector = surface_normal
+            print(f"   📐 Estimated surface normal: {surface_normal}")
         
         # Convert to grasp pose
         grasp_pose = self.antipodal_points_to_grasp_pose(
@@ -750,9 +900,11 @@ class VLMGraspEval:
             approach_vector=approach_vector
         )
         
-        # Convert to grasp array
+        # Convert to grasp array with proper width
+        grasp_width = np.linalg.norm(point2_3d - point1_3d)
         grasp_array = self.pose_to_grasp_array(
             grasp_pose, 
+            width=grasp_width,
             confidence=parsed_response.get('confidence', 1.0)
         )
         
@@ -783,8 +935,12 @@ class VLMGraspEval:
             'evaluation_success': dexnet_score >= 0
         }
         
-        # if visualize:
-        self.visualize_grasp_result(scene_id, ann_id, result)
+        if visualize:
+            # Traditional matplotlib visualization
+            self.visualize_grasp_result(scene_id, ann_id, result)
+            
+            # Enhanced viser visualization with ground truth comparison
+            self.visualize_with_viser(scene_id, ann_id, result, target_obj_idx)
         
         print(f"DexNet Quality Score: {dexnet_score:.3f}")
         
@@ -1075,6 +1231,314 @@ class VLMGraspEval:
         
         print(f"📋 Summary visualization saved: {output_path}")
 
+    def visualize_with_viser(self, scene_id: int, ann_id: int, result: Dict, target_obj_idx: int):
+        """
+        Enhanced 3D visualization using viser with ground truth comparison.
+        
+        **Input:**
+        - scene_id: scene index
+        - ann_id: annotation index
+        - result: evaluation result dictionary
+        - target_obj_idx: object index for loading ground truth
+        """
+        try:
+            import viser
+            import time
+            print("🚀 Starting viser visualization...")
+            
+            # Create viser server
+            server = viser.ViserServer(port=8080)
+            print(f"   🌐 Viser server started at http://localhost:8080")
+            
+            # Load scene point cloud
+            try:
+                pcd = self.loadScenePointCloud(scene_id, self.camera, ann_id)
+                scene_points = np.array(pcd.points)
+                scene_colors = np.array(pcd.colors)
+                
+                # Add scene point cloud
+                server.scene.add_point_cloud(
+                    name="scene_points",
+                    points=scene_points,
+                    colors=scene_colors,
+                    point_size=0.003
+                )
+                print(f"   ✅ Added scene point cloud ({len(scene_points)} points)")
+                
+            except Exception as e:
+                print(f"   ⚠️ Could not load scene point cloud: {e}")
+            
+            # Add VLM grasp visualization
+            self._add_vlm_grasp_to_viser(server, result)
+            
+            # Load and add ground truth grasps
+            try:
+                gt_grasps, gt_scores = self.load_ground_truth_grasps(target_obj_idx, max_grasps=20)
+                if len(gt_grasps) > 0:
+                    self._add_ground_truth_grasps_to_viser(server, gt_grasps, gt_scores, target_obj_idx, scene_id, ann_id)
+                else:
+                    print("   ⚠️ No ground truth grasps to display")
+            except Exception as e:
+                print(f"   ⚠️ Could not load ground truth grasps: {e}")
+            
+            # Add object model if available
+            try:
+                object_model, _ = self.get_object_model_and_dexnet(scene_id, ann_id, target_obj_idx)
+                object_pose = self.get_object_pose_in_camera(scene_id, ann_id, target_obj_idx)
+                
+                # Transform object model to camera coordinates
+                object_model_cam = self.transform_points(object_model, object_pose)
+                
+                server.scene.add_point_cloud(
+                    name="object_model",
+                    points=object_model_cam,
+                    colors=np.array([[1.0, 0.8, 0.0]] * len(object_model_cam)),  # Orange
+                    point_size=0.005
+                )
+                print(f"   ✅ Added object model ({len(object_model_cam)} points)")
+                
+            except Exception as e:
+                print(f"   ⚠️ Could not load object model: {e}")
+            
+            # Add text information
+            info_text = f"""VLM Grasp Evaluation Results
+
+Scene: {scene_id:04d} | Annotation: {ann_id:04d}
+Target Object: {result['target_object']} (ID: {target_obj_idx})
+
+VLM Results:
+• Point 1: {result['point1_3d']}
+• Point 2: {result['point2_3d']}
+• Confidence: {result['vlm_response'].get('confidence', 'N/A')}
+
+DexNet Score: {result['dexnet_score']:.3f}
+Evaluation: {'✅ Success' if result['evaluation_success'] else '❌ Failed'}
+
+Legend:
+🔴 VLM Grasp Points
+🟢 Ground Truth Grasps
+🟡 Object Model
+🔵 Scene Points"""
+            
+            # server.scene.add_3d_gui_text(
+            #     name="info_panel",
+            #     text=info_text,
+            #     position=(0.5, 0.5, 0.5),
+            #     font_size=12
+            # )
+            print(info_text)
+            print("   🎯 Visualization complete! Check http://localhost:8080")
+            print("   💡 Press Ctrl+C to stop the server when done viewing")
+            
+            # Keep server running for viewing
+            try:
+                while True:
+                    time.sleep(1.0)
+            except KeyboardInterrupt:
+                print("\n   🛑 Stopping viser server...")
+                
+        except ImportError:
+            print("❌ Viser not installed. Please install with: pip install viser")
+        except Exception as e:
+            print(f"❌ Error in viser visualization: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _add_vlm_grasp_to_viser(self, server, result: Dict):
+        """Add VLM grasp to viser visualization."""
+        point1_3d = np.array(result['point1_3d'])
+        point2_3d = np.array(result['point2_3d'])
+        grasp_center = (point1_3d + point2_3d) / 2.0
+        
+        # Add grasp points
+        server.scene.add_point_cloud(
+            name="vlm_grasp_points",
+            points=np.array([point1_3d, point2_3d]),
+            colors=np.array([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),  # Red
+            point_size=0.01
+        )
+        
+        # Add grasp line
+        server.scene.add_spline_catmull_rom(
+            name="vlm_grasp_line",
+            positions=np.array([point1_3d, point2_3d]),
+            color=(1.0, 0.0, 0.0),  # Red
+            line_width=5.0
+        )
+        
+        # Add grasp pose frame
+        if 'grasp_pose' in result:
+            grasp_pose = result['grasp_pose']
+            self._add_coordinate_frame_to_viser(
+                server, 
+                "vlm_grasp_frame", 
+                grasp_pose, 
+                scale=0.05,
+                alpha=0.8
+            )
+        
+        print(f"   ✅ Added VLM grasp visualization")
+
+    def _add_ground_truth_grasps_to_viser(self, server, gt_grasps: np.ndarray, gt_scores: np.ndarray, 
+                                        target_obj_idx: int, scene_id: int, ann_id: int):
+        """Add ground truth grasps to viser visualization."""
+        if len(gt_grasps) == 0:
+            return
+            
+        try:
+            # Get object pose to transform grasps to camera coordinates
+            object_pose = self.get_object_pose_in_camera(scene_id, ann_id, target_obj_idx)
+            
+            gt_points = []
+            gt_colors = []
+            
+            for i, (grasp, score) in enumerate(zip(gt_grasps, gt_scores)):
+                # Extract grasp center and rotation
+                grasp_center = grasp[13:16]  # translation
+                rotation_matrix = grasp[4:13].reshape(3, 3)  # rotation
+                
+                # Transform to camera coordinates
+                grasp_center_cam = self.transform_points(grasp_center.reshape(1, -1), object_pose)[0]
+                
+                gt_points.append(grasp_center_cam)
+                
+                # Color by score (green for high, yellow for medium, red for low)
+                if score > 0.8:
+                    color = [0.0, 1.0, 0.0]  # Green
+                elif score > 0.6:
+                    color = [1.0, 1.0, 0.0]  # Yellow
+                else:
+                    color = [1.0, 0.5, 0.0]  # Orange
+                gt_colors.append(color)
+                
+                # Add individual grasp frame for top grasps
+                if i < 5:  # Only show frames for top 5 grasps
+                    # Create pose matrix
+                    gt_pose = np.eye(4)
+                    gt_pose[:3, :3] = rotation_matrix
+                    gt_pose[:3, 3] = grasp_center
+                    
+                    # Transform pose to camera coordinates
+                    gt_pose_cam = object_pose @ gt_pose
+                    
+                    self._add_coordinate_frame_to_viser(
+                        server,
+                        f"gt_grasp_frame_{i}",
+                        gt_pose_cam,
+                        scale=0.03,
+                        alpha=0.6
+                    )
+            
+            # Add all ground truth grasp points
+            if gt_points:
+                server.scene.add_point_cloud(
+                    name="ground_truth_grasps",
+                    points=np.array(gt_points),
+                    colors=np.array(gt_colors),
+                    point_size=0.008
+                )
+                
+                print(f"   ✅ Added {len(gt_points)} ground truth grasps")
+            
+        except Exception as e:
+            print(f"   ⚠️ Error adding ground truth grasps: {e}")
+
+    def _add_coordinate_frame_to_viser(self, server, name: str, pose: np.ndarray, 
+                                     scale: float = 0.1, alpha: float = 1.0):
+        """Add a coordinate frame to viser visualization."""
+        position = pose[:3, 3]
+        rotation_matrix = pose[:3, :3]
+        
+        # X-axis (red)
+        x_end = position + rotation_matrix[:, 0] * scale
+        server.scene.add_spline_catmull_rom(
+            name=f"{name}_x",
+            positions=np.array([position, x_end]),
+            color=(1.0, 0.0, 0.0),  # Red
+            line_width=3.0
+        )
+        
+        # Y-axis (green)
+        y_end = position + rotation_matrix[:, 1] * scale
+        server.scene.add_spline_catmull_rom(
+            name=f"{name}_y", 
+            positions=np.array([position, y_end]),
+            color=(0.0, 1.0, 0.0),  # Green
+            line_width=3.0
+        )
+        
+        # Z-axis (blue)
+        z_end = position + rotation_matrix[:, 2] * scale
+        server.scene.add_spline_catmull_rom(
+            name=f"{name}_z",
+            positions=np.array([position, z_end]),
+            color=(0.0, 0.0, 1.0),  # Blue
+            line_width=3.0
+        )
+
+    def transform_points(self, points: np.ndarray, transform: np.ndarray) -> np.ndarray:
+        """Transform 3D points using a 4x4 transformation matrix."""
+        if points.shape[1] == 3:
+            # Add homogeneous coordinate
+            ones = np.ones((points.shape[0], 1))
+            points_homo = np.hstack([points, ones])
+        else:
+            points_homo = points
+            
+        # Apply transformation
+        transformed = (transform @ points_homo.T).T
+        
+        # Return 3D coordinates
+        return transformed[:, :3]
+
+    def estimate_surface_normal(self, point: np.ndarray, scene_id: int, ann_id: int, 
+                              radius: float = 0.02) -> np.ndarray:
+        """
+        Estimate surface normal at a point using nearby points from the point cloud.
+        
+        **Input:**
+        - point: 3D point to estimate normal at
+        - scene_id: scene index
+        - ann_id: annotation index 
+        - radius: radius for neighborhood search
+        
+        **Output:**
+        - normal: estimated surface normal vector (pointing outward)
+        """
+        try:
+            # Load scene point cloud
+            pcd = self.loadScenePointCloud(scene_id, self.camera, ann_id)
+            scene_points = np.array(pcd.points)
+            
+            # Find nearby points
+            distances = np.linalg.norm(scene_points - point, axis=1)
+            nearby_indices = np.where(distances < radius)[0]
+            
+            if len(nearby_indices) < 3:
+                # Not enough points, return upward normal
+                return np.array([0, 0, 1])
+            
+            nearby_points = scene_points[nearby_indices]
+            
+            # Use PCA to estimate surface normal
+            centered_points = nearby_points - np.mean(nearby_points, axis=0)
+            cov_matrix = np.cov(centered_points.T)
+            eigenvals, eigenvecs = np.linalg.eigh(cov_matrix)
+            
+            # Normal is the eigenvector with smallest eigenvalue
+            normal = eigenvecs[:, 0]
+            
+            # Make sure normal points away from camera (outward)
+            to_camera = -point  # Vector from point to camera at origin
+            if np.dot(normal, to_camera) < 0:
+                normal = -normal
+                
+            return normal / np.linalg.norm(normal)
+            
+        except Exception as e:
+            print(f"   ⚠️ Could not estimate surface normal: {e}")
+            return np.array([0, 0, 1])  # Default upward normal
+
 
 # Example usage and demonstration
 def example_usage():
@@ -1122,7 +1586,6 @@ def example_usage():
     else:
         print(f"Evaluation completed successfully!")
         print(f"DexNet Score: {result['dexnet_score']:.3f}")
-        print(f"VLM Confidence: {result['vlm_response'].get('confidence', 'N/A')}")
 
 
 def batch_evaluation_example():
