@@ -846,23 +846,23 @@ class VLMGraspEval:
             return {'error': error_msg}
         
         # # Query VLM for grasp points
-        # print(f"Querying {vlm_type} VLM for grasp points...")
-        # if vlm_type == 'ollama':
-        #     vlm_response = self.query_vlm_ollama(image_path, target_object)
-        # elif vlm_type == 'openai':
-        #     if api_key is None:
-        #         return {'error': 'API key required for OpenAI'}
-        #     vlm_response = self.query_vlm_openai(image_path, target_object, api_key)
-        # else:
-        #     return {'error': f'Unsupported VLM type: {vlm_type}'}
+        print(f"Querying {vlm_type} VLM for grasp points...")
+        if vlm_type == 'ollama':
+            vlm_response = self.query_vlm_ollama(image_path, target_object)
+        elif vlm_type == 'openai':
+            if api_key is None:
+                return {'error': 'API key required for OpenAI'}
+            vlm_response = self.query_vlm_openai(image_path, target_object, api_key)
+        else:
+            return {'error': f'Unsupported VLM type: {vlm_type}'}
         
-        # if vlm_response is None:
-        #     return {'error': 'Failed to get VLM response'}
+        if vlm_response is None:
+            return {'error': 'Failed to get VLM response'}
         
-        # # Parse VLM response
-        # parsed_response = self.parse_vlm_response(vlm_response, vlm_type)
-        # if parsed_response is None:
-        #     return {'error': 'Failed to parse VLM response'}
+        # Parse VLM response
+        parsed_response = self.parse_vlm_response(vlm_response, vlm_type)
+        if parsed_response is None:
+            return {'error': 'Failed to parse VLM response'}
         
         parsed_response = {
             'point1': [405, 385],
